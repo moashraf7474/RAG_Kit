@@ -1,0 +1,55 @@
+# Reverse proxy for the production stack.
+#
+# {$DOMAIN} comes from the compose environment. Two ways to run it:
+#
+#   Real deployment   DOMAIN=rag.example.com  TLS_ISSUER_EMAIL=ops@example.com
+#                     Caddy fetches a Let's Encrypt certificate automatically.
+#                     Requires ports 80+443 open and DNS already pointing here.
+#
+#   Local prod test   DOMAIN=localhost
+#                     Caddy issues its own internal cert — no ACME, no DNS.
+#                     Your browser will warn unless you trust Caddy's local CA.
+#                     Reach it at https://localhost.
+
+# No global `email` directive here on purpose. Compose always passes
+# TLS_ISSUER_EMAIL through (empty when unset), and a bare `email` with no
+# argument is a Caddy syntax error rather than a no-op. ACME works without a
+# contact address — it only means no certificate-expiry notifications. To
+# receive them, add `email you@example.com` in a `{ }` block above this line.
+{$DOMAIN} {
+	encode zstd gzip
+
+	# Django owns these three prefixes; everything else is Next.js.
+	# `handle` blocks are mutually exclusive and evaluated in order, so the
+	# catch-all at the bottom only sees what did not match above.
+	handle /api/* {
+		reverse_proxy api:8000
+	}
+
+	handle /admin/* {
+		reverse_proxy api:8000
+	}
+
+	handle /static/* {
+		reverse_proxy api:8000
+	}
+
+	handle {
+		reverse_proxy web:3000
+	}
+
+	# HSTS is set by Django on its own responses; add it here so the Next.js
+	# routes are covered too. Matches SECURE_HSTS_SECONDS in settings.py.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "same-origin"
+		# Caddy advertises itself by default; no reason to help fingerprinting.
+		-Server
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

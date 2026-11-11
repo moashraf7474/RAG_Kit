@@ -1,0 +1,120 @@
+RAG Starter
+Copyright (c) 2026 Anas Ahmad
+
+This product includes software developed by third parties, as described below.
+The project as a whole is distributed under the MIT License (see LICENSE).
+
+
+================================================================================
+1. stackitcloud/rag-template  —  Apache License, Version 2.0
+================================================================================
+
+   Copyright 2024 Melvin Klein
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+
+Source:  https://github.com/stackitcloud/rag-template
+License: a full copy of the Apache License, Version 2.0 is included at
+         LICENSES/Apache-2.0.txt
+
+STATEMENT OF CHANGES (Apache-2.0 section 4(b))
+
+The RAG pipeline in this project is a port of stackitcloud/rag-template and has
+been modified. The upstream project is a set of five FastAPI microservices plus
+a Vue/Nx frontend, wired together with generated OpenAPI clients and a
+dependency-injection container, and deployed with Helm, Kustomize, Terraform and
+Tilt. Here the same pipeline has been restructured into a single Django monolith
+with a Next.js frontend, deployed with Docker Compose.
+
+Concretely, the following changes were made to the derived code:
+
+  - The microservice boundaries were removed. `admin-backend`,
+    `document-extractor` and `rag-backend` became plain Python modules inside one
+    Django application; the two generated OpenAPI clients and the two HTTP hops
+    per document ingest were replaced by direct function calls.
+  - The dependency-injection container was removed in favour of plain module
+    imports and a single environment-driven settings module (`backend/rag/conf.py`).
+  - Multi-tenancy was added. Upstream ran single-tenant behind basic auth; every
+    vector search in this port carries an `owner_id` filter enforced in the query
+    itself.
+  - Document status moved from a Redis key-value store to a PostgreSQL table so
+    that it survives restarts.
+  - Token streaming was added on top of the chat graph (`astream_answer`) so the
+    frontend can render answers progressively.
+  - The Qdrant vector store setup was changed from upstream's `from_documents`
+    re-assignment to an explicit create-collection-once plus `add_documents` flow.
+  - The FlashRank reranker port restores chunk metadata that LangChain's wrapper
+    drops, because citations depend on it.
+  - The upstream `mcp-server` service was not ported.
+
+Files in this repository that are derived from stackitcloud/rag-template
+(each carries a "Ported from ..." docstring naming its upstream origin):
+
+  backend/rag/graph.py       from rag_core_api/impl/graph/chat_graph.py
+  backend/rag/retrieval.py   from rag_core_api/impl/retriever/composite_retriever.py
+                             and retriever_quark.py
+  backend/rag/prompts.py     from rag_core_api/prompt_templates/* and
+                             admin_api_lib/prompt_templates/summarize_prompt.py
+                             (ported verbatim)
+  backend/rag/rerank.py      from rag_core_api/impl/reranking/flashrank_reranker.py
+  backend/rag/vectordb.py    from rag_core_api/impl/vector_databases/qdrant_database.py
+  backend/rag/enhance.py     from admin_api_lib/impl/information_enhancer/
+                             page_summary_enhancer.py and
+                             admin_api_lib/impl/summarizer/langchain_summarizer.py
+  backend/rag/chunking.py    from admin_api_lib/impl/chunker/text_chunker.py
+  backend/rag/llm.py         from rag_core_lib/impl/llms/llm_factory.py
+  backend/rag/storage.py     from rag_core_lib/impl/file_services/s3_service.py
+  backend/rag/conf.py        from libs/rag-core-api/.../impl/settings/*
+  backend/rag/models.py      status and content-type enums from
+                             admin_api_lib/models/status.py and
+                             rag_core_lib/impl/data_types/content_type.py
+  backend/rag/extract.py     from extractor_api_lib/* (sitemap and Confluence
+                             extractors in particular)
+  backend/rag/ingest.py      replaces the upstream admin-backend ->
+                             document-extractor -> rag-backend ingestion path
+  backend/rag/views.py       replaces upstream rag_api.py and admin_api.py
+  backend/rag/serializers.py chat request/response shapes from upstream
+
+
+================================================================================
+2. unfoldadmin/turbo  —  MIT License
+================================================================================
+
+   MIT License
+
+   Copyright (c) 2023 Unfold Admin
+
+   Permission is hereby granted, free of charge, to any person obtaining a copy
+   of this software and associated documentation files (the "Software"), to deal
+   in the Software without restriction, including without limitation the rights
+   to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+   copies of the Software, and to permit persons to whom the Software is
+   furnished to do so, subject to the following conditions:
+
+   The above copyright notice and this permission notice shall be included in all
+   copies or substantial portions of the Software.
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+   SOFTWARE.
+
+Source: https://github.com/unfoldadmin/turbo
+
+This project was scaffolded from the turbo boilerplate, which contributed the
+Django + Next.js monorepo layout, the JWT authentication setup, the Unfold admin
+theme configuration, and the initial Docker and tooling configuration. That code
+has been modified and extended throughout.

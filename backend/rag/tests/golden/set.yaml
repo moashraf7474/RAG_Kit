@@ -1,0 +1,6 @@
+- id: starter-guide-answer
+  question: "What does the RAG starter guide explain?"
+  document: "RAG_Starter_Beginners_Guide.docx"
+  must_contain: ["RAG"]
+  must_not_contain: ["I couldn't find anything"]
+  min_faithfulness: 0.8

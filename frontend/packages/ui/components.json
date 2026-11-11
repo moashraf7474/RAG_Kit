@@ -1,0 +1,20 @@
+{
+    "$schema": "https://ui.shadcn.com/schema.json",
+    "style": "default",
+    "rsc": true,
+    "tsx": true,
+    "tailwind": {
+      "config": "tailwind.config.ts",
+      "css": "globals.css",
+      "baseColor": "gray",
+      "cssVariables": true
+    },
+    "iconLibrary": "lucide",
+    "aliases": {
+      "components": "@rag-kit/ui/components",
+      "utils": "@rag-kit/ui/lib/utils",
+      "hooks": "@rag-kit/ui/hooks",
+      "lib": "@rag-kit/ui/lib",
+      "ui": "@rag-kit/ui/components"
+    }
+  }

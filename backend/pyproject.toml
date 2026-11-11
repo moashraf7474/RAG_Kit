@@ -1,0 +1,115 @@
+[project]
+name = "rag-kit"
+requires-python = ">=3.13"
+version = "0.1.0"
+dependencies = [
+    # --- web ---
+    "django>=5.1",
+    "psycopg[binary]>=3.2",
+    "djangorestframework>=3.15",
+    "djangorestframework-simplejwt>=5.3",
+    "drf-spectacular>=0.28",
+    "django-unfold>=0.43.0",
+    "django-cors-headers>=4.6",
+    "gunicorn>=23.0",
+    "uvicorn[standard]>=0.34",
+    # --- async work ---
+    "celery[redis]>=5.4",
+    "redis>=5.2",
+    "django-celery-results>=2.5",
+    # --- rag core ---
+    "langchain>=0.3.14",
+    "langchain-core>=0.3.29",
+    "langchain-openai>=0.3",
+    "langchain-community>=0.3.14",
+    "langchain-text-splitters>=0.3.5",
+    "langgraph>=0.2.62",
+    "langchain-qdrant>=0.2",
+    "qdrant-client>=1.12,<1.13",
+    "fastembed>=0.5",
+    "openai>=1.59",
+    "tiktoken>=0.8",
+    # 2.x's LangChain callback handler imports langchain.callbacks.base, a path
+    # removed in LangChain 1.x (this project's version). 3.x+ branches on
+    # langchain.__version__ and imports from langchain_core instead.
+    "langfuse>=3",
+    "langdetect>=1.0.9",
+    "pydantic-settings>=2.7",
+    # --- ingestion ---
+    "boto3>=1.35",
+    "markitdown[all]>=0.0.1a3",
+    "pypdf>=5.1",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.3",
+    "requests>=2.32",
+    "python-magic>=0.4.27",
+    "flashrank>=0.2.10",
+]
+
+[project.optional-dependencies]
+# Heavy, best-quality extraction (pulls torch). Enable with: uv sync --extra docling
+docling = [
+    "docling>=2.15",
+    "docling-core>=2.12",
+    # Declare these directly so uv applies the explicit CPU index to Docling's
+    # transitive model dependencies as well.
+    "torch>=2.13,<2.14",
+    "torchvision>=0.28,<0.29",
+]
+# Confluence source ingestion
+confluence = [
+    "atlassian-python-api>=3.41",
+]
+# RAGAS-based offline evaluation
+evaluation = [
+    "ragas>=0.2.9",
+    "datasets>=3.2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.4",
+    "pytest-django>=4.9.0",
+    "pytest-factoryboy>=2.7.0",
+    "pytest-asyncio>=0.25",
+    "pytest-cov>=6.0",
+]
+
+[tool.ruff]
+fix = true
+line-length = 88
+
+[tool.ruff.lint]
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort
+    "C",  # flake8-comprehensions
+    "B",  # flake8-bugbear
+    "UP", # pyupgrade
+]
+ignore = [
+    "E501", # line too long, handled by black
+    "B008", # do not perform function calls in argument defaults
+    "C901", # too complex
+]
+
+[tool.pytest.ini_options]
+filterwarnings = "ignore"
+addopts = "--strict-config --strict-markers --ds=api.settings"
+markers = [
+    "golden: live answer-quality checks; run with RUN_GOLDEN=1",
+]
+asyncio_mode = "auto"
+
+# Docling's standard extra depends on PyTorch. Keep the ingestion worker CPU
+# only; the API and local Docker host do not need CUDA runtime packages.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+torchvision = [{ index = "pytorch-cpu" }]

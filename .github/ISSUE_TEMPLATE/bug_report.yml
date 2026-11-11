@@ -1,0 +1,93 @@
+name: Bug report
+description: Something does not work the way the README says it should
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please check the **Troubleshooting** section of
+        the README first — misconfigured `EMBEDDER_DIMENSIONS`, a missing API
+        key, and a too-high `RETRIEVER_THRESHOLD` account for most reports.
+
+        Do not report security vulnerabilities here. See
+        [SECURITY.md](../blob/main/SECURITY.md).
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected, and what you got instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. docker compose up
+        2. Upload a 12-page PDF on /documents
+        3. Status goes to ERROR with "..."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part of the stack
+      options:
+        - Ingestion (upload, extraction, chunking, embedding)
+        - Retrieval / answer quality
+        - Chat streaming
+        - Frontend UI
+        - Django admin
+        - Docker Compose / setup
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: >-
+        Output from `docker compose logs api worker`, or the browser console.
+        Redact API keys and secrets.
+      render: shell
+
+  - type: input
+    id: health
+    attributes:
+      label: Health check output
+      description: "`make health`, or GET /api/health/ — tells us which dependency is down."
+      placeholder: '{"status": "ok", ...}'
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Relevant configuration
+      description: >-
+        Model provider and the settings you changed from the template
+        (`LLM_MODEL`, `EMBEDDER_MODEL`, `EMBEDDER_DIMENSIONS`,
+        `RETRIEVER_THRESHOLD`, `VECTOR_DB_RETRIEVAL_MODE`).
+        **Never paste API keys.**
+      render: shell
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Docker version, and whether you run via Docker or locally.
+      placeholder: macOS 15, Docker 27.3, docker compose
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I read the Troubleshooting section of the README
+          required: true
+        - label: I have removed all secrets from the output above
+          required: true

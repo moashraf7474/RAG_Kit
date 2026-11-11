@@ -1,0 +1,22 @@
+# Keep host artefacts and secrets out of the image. `COPY . .` in the
+# production stage would otherwise bake in local caches and any stray .env.
+__pycache__
+**/__pycache__
+*.pyc
+.venv
+.pytest_cache
+.ruff_cache
+.mypy_cache
+htmlcov
+.coverage
+
+.git
+.DS_Store
+*.log
+
+.env
+.env.*
+!.env*.template
+celerybeat-schedule*
+staticfiles
+data

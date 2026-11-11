@@ -1,0 +1,16 @@
+# Host artefacts must never enter the build context: they bloat it by ~900MB
+# and a host-built node_modules (wrong platform, wrong store path) makes pnpm
+# try to purge the modules dir mid-build.
+node_modules
+**/node_modules
+.pnpm-store
+**/.next
+**/out
+**/build
+
+.git
+.DS_Store
+*.log
+.env
+.env.*
+!.env*.template

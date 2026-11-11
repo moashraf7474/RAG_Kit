@@ -1,0 +1,265 @@
+name: rag-kit-prod
+
+# Production stack.  docker compose -f docker-compose.prod.yml up -d
+#
+# Differs from the dev stack (docker-compose.yaml) in ways that matter:
+#   - sources are baked into the image, never bind-mounted
+#   - gunicorn instead of runserver, `next build` instead of `next dev`
+#   - only Caddy publishes ports; everything else is compose-network only
+#   - its own named volumes, so prod and dev never share state
+#
+# Reads .env.prod — copy .env.prod.template and fill it in first.
+
+# IMPORTANT: always pass `--env-file .env.prod`, as the Makefile targets do:
+#
+#     docker compose --env-file .env.prod -f docker-compose.prod.yml up -d
+#
+# `env_file:` below only injects variables *into containers*. Compose resolves
+# ${DOMAIN} and the other ${...} placeholders in THIS file from `.env` (which
+# here holds dev host-port overrides), so without the flag they come out empty.
+x-backend-env: &backend-env
+  env_file:
+    - .env.prod
+
+services:
+  # -------------------------------------------------------------- proxy ---
+  # The only service reachable from outside. Terminates TLS and fans out to
+  # the api and web containers.
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    mem_limit: 256m
+    ports:
+      - "80:80"
+      - "443:443"
+      # HTTP/3.
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates and ACME account keys. Losing this volume means
+      # re-issuing certs, which is rate-limited by Let's Encrypt.
+      - caddy-data-prod:/data
+      - caddy-config-prod:/config
+    environment:
+      DOMAIN: "${DOMAIN:?set DOMAIN in .env.prod}"
+    healthcheck:
+      test: ["CMD", "caddy", "version"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+
+  # --------------------------------------------------------------- data ---
+  # No `ports:` on any data service — they are reachable only on the compose
+  # network. Use `docker compose -f docker-compose.prod.yml exec` for admin.
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    mem_limit: 1g
+    expose:
+      - "5432"
+    volumes:
+      - postgres-data-prod:/var/lib/postgresql/data
+      - ./backend/init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
+    environment:
+      POSTGRES_PASSWORD: "${DATABASE_PASSWORD:?set DATABASE_PASSWORD in .env.prod}"
+      POSTGRES_DB: "${DATABASE_NAME:-db}"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  qdrant:
+    # Pinned in step with `qdrant-client` in backend/pyproject.toml. Qdrant
+    # storage is NOT forward compatible: bumping across minor versions needs a
+    # snapshot restore (scripts/backup.sh), so change both together.
+    image: qdrant/qdrant:v1.12.6
+    restart: unless-stopped
+    mem_limit: 2g
+    expose:
+      - "6333"
+      - "6334"
+    volumes:
+      - qdrant-data-prod:/qdrant/storage
+    environment:
+      # Unlike dev, this is set: even on an internal network the API key is the
+      # only thing standing between a compromised container and the whole index.
+      QDRANT__SERVICE__API_KEY: "${VECTOR_DB_API_KEY:?set VECTOR_DB_API_KEY in .env.prod}"
+      QDRANT__STORAGE__OPTIMIZERS__DEFAULT_SEGMENT_NUMBER: "2"
+    healthcheck:
+      # The image is distroless: no curl/wget, so probe from Qdrant's own binary.
+      test: ["CMD", "/qdrant/qdrant", "--version"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    mem_limit: 1g
+    command: redis-server --appendonly yes --maxmemory 768mb --maxmemory-policy allkeys-lru
+    expose:
+      - "6379"
+    volumes:
+      - redis-data-prod:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    restart: unless-stopped
+    mem_limit: 1g
+    command: server /data --console-address ":9001"
+    expose:
+      - "9000"
+      - "9001"
+    volumes:
+      - minio-data-prod:/data
+    environment:
+      MINIO_ROOT_USER: "${S3_ACCESS_KEY_ID:?set S3_ACCESS_KEY_ID in .env.prod}"
+      MINIO_ROOT_PASSWORD: "${S3_SECRET_ACCESS_KEY:?set S3_SECRET_ACCESS_KEY in .env.prod}"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ------------------------------------------------------------ backend ---
+  api:
+    build:
+      context: backend
+      target: production
+    restart: unless-stopped
+    mem_limit: 2g
+    # Migrations run here rather than in a separate job: with a single api
+    # replica this is the simplest thing that is still correct. If you scale
+    # api beyond one replica, move `migrate` to a one-shot job instead so two
+    # containers cannot race each other.
+    # ponytail: single-replica assumption, split out a migrate job when scaling.
+    command: >
+      bash -c "uv run -- python manage.py migrate --noinput &&
+               uv run -- python manage.py init_rag --wait 60 &&
+               uv run -- gunicorn api.wsgi:application
+                 --bind 0.0.0.0:8000
+                 --workers ${GUNICORN_WORKERS:-4}
+                 --threads ${GUNICORN_THREADS:-2}
+                 --timeout 300
+                 --access-logfile -
+                 --error-logfile -"
+    <<: *backend-env
+    expose:
+      - "8000"
+    volumes:
+      # Model weights only. No source mount: the code is in the image.
+      - model-cache-prod:/home/appuser/.cache/huggingface
+      - flashrank-cache-prod:/tmp/flashrank
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/api/health/ || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      # Migrations plus the first embedding-model download.
+      start_period: 180s
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: backend
+      target: production
+    restart: unless-stopped
+    mem_limit: 4g
+    command: >
+      uv run -- celery -A api worker --loglevel=INFO
+        --concurrency=${CELERY_CONCURRENCY:-2}
+        --max-tasks-per-child=${CELERY_MAX_TASKS_PER_CHILD:-50}
+    <<: *backend-env
+    volumes:
+      - model-cache-prod:/home/appuser/.cache/huggingface
+      - flashrank-cache-prod:/tmp/flashrank
+    healthcheck:
+      test: ["CMD-SHELL", "uv run -- celery -A api inspect ping -d celery@$$HOSTNAME || exit 1"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 180s
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  beat:
+    build:
+      context: backend
+      target: production
+    restart: unless-stopped
+    mem_limit: 512m
+    # The schedule file lives under /tmp because the image runs as a non-root
+    # user that cannot write to /app.
+    command: >
+      uv run -- celery -A api beat --loglevel=INFO
+        --schedule /tmp/celerybeat-schedule
+    <<: *backend-env
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # ----------------------------------------------------------- frontend ---
+  web:
+    build:
+      context: frontend
+      target: production
+    restart: unless-stopped
+    mem_limit: 1g
+    expose:
+      - "3000"
+    env_file:
+      - .env.prod
+    healthcheck:
+      # node:*-slim ships neither curl nor wget, so probe with node itself.
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://localhost:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      # Prebuilt image: it only has to boot, not compile.
+      start_period: 30s
+    depends_on:
+      api:
+        # Server components call the API while rendering, so starting before
+        # Django answers produces a page full of connection errors.
+        condition: service_healthy
+
+volumes:
+  # `-prod` suffixes keep production data strictly separate from the dev stack.
+  postgres-data-prod:
+  qdrant-data-prod:
+  redis-data-prod:
+  minio-data-prod:
+  model-cache-prod:
+  flashrank-cache-prod:
+  caddy-data-prod:
+  caddy-config-prod:

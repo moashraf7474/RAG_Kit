@@ -1,0 +1,63 @@
+name: Feature request
+description: Suggest something this template should do out of the box
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is a starter template, so the bar is: would most people building a
+        RAG product want this? Narrower ideas are usually better as a fork or a
+        documented extension point — which is a fine outcome, and worth opening
+        an issue to figure out.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve
+      description: >-
+        Describe the situation you hit, not the solution you have in mind.
+        "Broad questions return nothing useful" is more actionable than
+        "add feature X".
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like to happen
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part of the stack
+      options:
+        - Ingestion (extraction, chunking, embedding)
+        - Retrieval / reranking
+        - Chat graph / prompts
+        - Frontend UI
+        - Security / multi-tenancy
+        - Deployment / Docker
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: >-
+        Including whether existing configuration already covers it — most
+        retrieval tuning is already an environment variable.
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: I checked that this is not already configurable in `.env.backend.template`
+          required: true
+        - label: I would be willing to help implement this
+          required: false

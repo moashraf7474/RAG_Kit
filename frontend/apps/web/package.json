@@ -1,0 +1,20 @@
+{
+  "name": "rag-kit-web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@rag-kit/types": "workspace:^",
+    "@rag-kit/ui": "workspace:^",
+    "next": "^16.0.10",
+    "next-auth": "^4.24.13"
+  },
+  "devDependencies": {
+    "typescript": "5.7.2"
+  }
+}

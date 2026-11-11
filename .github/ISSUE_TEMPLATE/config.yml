@@ -1,0 +1,19 @@
+blank_issues_enabled: false
+contact_links:
+  # TODO(maintainer): enable Discussions on the repo, or delete this entry.
+  # Replace Kreability/rag-kit with the real path once published.
+  - name: Questions and setup help
+    url: https://github.com/Kreability/rag-kit/discussions
+    about: >-
+      Setup problems, retrieval tuning, and "how do I ..." questions belong in
+      Discussions rather than the issue tracker.
+
+  - name: Troubleshooting guide
+    url: https://github.com/Kreability/rag-kit#troubleshooting
+    about: >-
+      Covers the common failures: missing API keys, EMBEDDER_DIMENSIONS
+      mismatches, port conflicts, and degraded health checks.
+
+  - name: Report a security vulnerability
+    url: https://github.com/Kreability/rag-kit/security/advisories/new
+    about: Report privately through a GitHub security advisory, never as an issue.

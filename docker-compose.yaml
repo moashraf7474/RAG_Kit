@@ -1,0 +1,439 @@
+name: rag-kit
+
+# Core stack:  docker compose up
+# With tracing: docker compose --profile observability up
+# With local models (no API key needed): docker compose --profile local-llm up
+
+x-backend-env: &backend-env
+  env_file:
+    - path: .env.backend
+      required: false
+
+services:
+  # --------------------------------------------------------------- data ---
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    mem_limit: 768m
+    expose:
+      - "5432"
+    ports:
+      # Host port is configurable so the stack does not collide with a local
+      # Postgres. Containers always talk to db:5432 over the compose network.
+      - "${DATABASE_HOST_PORT:-5433}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # Creates the auxiliary `langfuse` database on first boot.
+      - ./backend/init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
+    environment:
+      POSTGRES_PASSWORD: "${DATABASE_PASSWORD:-change-password}"
+      POSTGRES_DB: "${DATABASE_NAME:-db}"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Production-grade vector database: HNSW index, hybrid dense+sparse search,
+  # payload filtering, snapshots. Persisted to a named volume.
+  qdrant:
+    # Pinned in step with `qdrant-client` in backend/pyproject.toml — the client
+    # warns when major/minor diverge. Note that Qdrant storage is NOT forward
+    # compatible: bumping this across minor versions requires a snapshot restore
+    # (or a wiped volume), so change both together, deliberately.
+    image: qdrant/qdrant:v1.12.6
+    restart: unless-stopped
+    mem_limit: 1g
+    expose:
+      - "6333"
+      - "6334"
+    ports:
+      - "${QDRANT_HOST_PORT:-6333}:6333"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    # NOTE: Qdrant is not published to the host by default and is only reachable
+    # on the compose network. To require an API key (recommended when exposing
+    # it), set VECTOR_DB_API_KEY in .env.backend and uncomment the line below —
+    # an *empty* QDRANT__SERVICE__API_KEY still forces auth and rejects requests,
+    # so it must be omitted entirely rather than set to "".
+    environment:
+      # QDRANT__SERVICE__API_KEY: "${VECTOR_DB_API_KEY}"
+      QDRANT__STORAGE__OPTIMIZERS__DEFAULT_SEGMENT_NUMBER: "2"
+    healthcheck:
+      # The image is distroless: no curl/wget, so probe from Qdrant's own binary.
+      test: ["CMD", "/qdrant/qdrant", "--version"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    mem_limit: 768m
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    expose:
+      - "6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # S3-compatible object storage for the original files behind every citation.
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    restart: unless-stopped
+    mem_limit: 512m
+    command: server /data --console-address ":9001"
+    expose:
+      - "9000"
+    ports:
+      - "${MINIO_HOST_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_HOST_PORT:-9001}:9001"
+    volumes:
+      - minio-data:/data
+    environment:
+      MINIO_ROOT_USER: "${S3_ACCESS_KEY_ID:-minioadmin}"
+      MINIO_ROOT_PASSWORD: "${S3_SECRET_ACCESS_KEY:-minioadmin}"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ------------------------------------------------------------ backend ---
+  api:
+    build:
+      context: backend
+      target: development
+    restart: unless-stopped
+    # 1g measured ~1021MiB in normal use (Django + cached embedder + reranker
+    # weights); 1536m still hit the ceiling and got OOM-killed mid-request
+    # (peaked ~1.19GiB) — confirmed via `docker inspect --format
+    # '{{.State.OOMKilled}}'` reading true after a live chat request. 2g
+    # matches the worker container's limit and leaves real headroom above
+    # the observed peak.
+    mem_limit: 2g
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: >
+      bash -c "uv sync &&
+               uv run -- python manage.py migrate &&
+               uv run -- python manage.py init_rag --wait 60 &&
+               uv run -- gunicorn api.wsgi:application -c gunicorn.conf.py"
+    env_file:
+      - path: .env.backend
+        required: false
+      # Also read the frontend's dev credentials so `init_rag` can recreate the
+      # account the frontend signs in as. Keeping them in one file avoids the
+      # two copies drifting apart. Harmless in production: without DEV_PASSWORD
+      # the step is skipped.
+      - path: .env.frontend
+        required: false
+    expose:
+      - "8000"
+    ports:
+      - "${API_HOST_PORT:-8000}:8000"
+    volumes:
+      - ./backend:/app
+      # Share only the ML model caches (embedding + rerank weights). Sharing
+      # all of /root/.cache would put uv's wheel cache under concurrent write
+      # from api and worker, which fails on startup.
+      - model-cache:/root/.cache/huggingface
+      - flashrank-cache:/tmp/flashrank
+    healthcheck:
+      # `start_period` is generous: the dev command runs `uv sync` and migrations
+      # before Django listens, and failures during it do not count as retries.
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/api/health/ || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  # Same image, same codebase, different command. Not a microservice.
+  worker:
+    build:
+      context: backend
+      target: worker-full
+    restart: unless-stopped
+    mem_limit: 2g
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: >
+      bash -c "uv sync --frozen --no-dev --extra docling &&
+               uv run -- celery -A api worker --loglevel=INFO --concurrency=1"
+    # concurrency=1, not 2: two simultaneous Docling conversions (each loading
+    # its own full layout/OCR/table-structure model stack) inside this
+    # container's 2 GB limit OOM-killed the worker on a 23 MB PDF — confirmed
+    # via repeated SIGKILL/requeue loop in production logs. One conversion at
+    # a time trades ingestion throughput for not crashing on real documents.
+    <<: *backend-env
+    environment:
+      # The worker image contains Docling; keep the API slim and fallback-only.
+      INGESTION_PREFER_DOCLING: "true"
+    volumes:
+      - ./backend:/app
+      # Share only the ML model caches (embedding + rerank weights). Sharing
+      # all of /root/.cache would put uv's wheel cache under concurrent write
+      # from api and worker, which fails on startup.
+      - model-cache:/root/.cache/huggingface
+      - flashrank-cache:/tmp/flashrank
+    healthcheck:
+      # `celery inspect ping` fails until the worker has registered with the broker.
+      test: ["CMD-SHELL", "uv run -- celery -A api inspect ping -d celery@$$HOSTNAME || exit 1"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 180s
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  # Periodic jobs (reaps documents stuck in PROCESSING).
+  beat:
+    build:
+      context: backend
+      target: development
+    restart: unless-stopped
+    mem_limit: 256m
+    command: >
+      bash -c "uv sync &&
+               uv run -- celery -A api beat --loglevel=INFO"
+    <<: *backend-env
+    volumes:
+      - ./backend:/app
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # ----------------------------------------------------------- frontend ---
+  web:
+    build:
+      context: frontend
+    restart: unless-stopped
+    mem_limit: 1g
+    command: bash -c "pnpm install -r && pnpm --filter rag-kit-web dev"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    expose:
+      - "3000"
+    ports:
+      - "${WEB_HOST_PORT:-3000}:3000"
+    env_file:
+      - path: .env.frontend
+        required: false
+    healthcheck:
+      # node:*-slim ships neither curl nor wget, so probe with node itself.
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://localhost:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      # First boot runs `pnpm install` for the whole workspace.
+      start_period: 240s
+    depends_on:
+      api:
+        # Wait for Django to actually answer, not merely for the container to
+        # exist: the frontend's server components call the API while rendering,
+        # so starting early produces a page full of connection errors.
+        condition: service_healthy
+
+  # ------------------------------------------- observability (optional) ---
+  # LLM tracing, prompt versioning, cost tracking, evaluation.
+  #
+  # v4 self-hosted (the `langfuse:2` image's server no longer exists as a
+  # supported target for the langfuse-python v3+ client, which this project's
+  # rag/llm.py uses — v2's server has no OTLP trace-ingestion endpoint).
+  # v4 needs ClickHouse (event storage) and its own Redis (job queue) beyond
+  # what the core stack already runs; `db`'s existing `langfuse` database is
+  # reused for its relational data.
+  langfuse-clickhouse:
+    image: clickhouse/clickhouse-server:25.12
+    profiles: ["observability"]
+    restart: unless-stopped
+    user: "101:101"
+    mem_limit: 1g
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: "${LANGFUSE_CLICKHOUSE_PASSWORD:-change-me-clickhouse}"
+    expose:
+      - "8123"
+      - "9000"
+    volumes:
+      - langfuse-clickhouse-data:/var/lib/clickhouse
+      - langfuse-clickhouse-logs:/var/log/clickhouse-server
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  # Dedicated Redis for Langfuse's job queue: the core `redis` service runs
+  # allkeys-lru eviction for Celery's broker, which would silently drop
+  # queued Langfuse jobs under memory pressure. Langfuse requires noeviction.
+  langfuse-redis:
+    image: redis:7-alpine
+    profiles: ["observability"]
+    restart: unless-stopped
+    mem_limit: 256m
+    command: --requirepass ${LANGFUSE_REDIS_AUTH:-change-me-langfuse-redis} --maxmemory-policy noeviction
+    expose:
+      - "6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${LANGFUSE_REDIS_AUTH:-change-me-langfuse-redis}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Object storage for Langfuse's exported events and uploaded media. Separate
+  # from the app's own `minio` service so the two never share a bucket
+  # namespace.
+  langfuse-minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    profiles: ["observability"]
+    restart: unless-stopped
+    mem_limit: 512m
+    entrypoint: sh
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      MINIO_ROOT_USER: "${LANGFUSE_MINIO_ROOT_USER:-langfuse-minio}"
+      MINIO_ROOT_PASSWORD: "${LANGFUSE_MINIO_ROOT_PASSWORD:-change-me-langfuse-minio}"
+    expose:
+      - "9000"
+      - "9001"
+    volumes:
+      - langfuse-minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  langfuse-worker:
+    image: docker.langfuse.com/langfuse/langfuse-worker:4
+    profiles: ["observability"]
+    restart: unless-stopped
+    mem_limit: 1g
+    environment: &langfuse-env
+      NEXTAUTH_URL: "http://localhost:${LANGFUSE_HOST_PORT:-3001}"
+      DATABASE_URL: "postgresql://postgres:${DATABASE_PASSWORD:-change-password}@db:5432/langfuse"
+      SALT: "${LANGFUSE_SALT:-change-me-langfuse-salt}"
+      # No safe default (encrypts stored secrets). Compose only reads
+      # .env.backend for ${VAR} interpolation like this when invoked with
+      # `--env-file .env.backend` — env_file: further down (container-runtime
+      # only) does not cover this substitution. Run this profile as:
+      #   docker compose --env-file .env.backend --profile observability up
+      ENCRYPTION_KEY: "${LANGFUSE_ENCRYPTION_KEY:?LANGFUSE_ENCRYPTION_KEY is required — generate with: openssl rand -hex 32}"
+      TELEMETRY_ENABLED: "false"
+      CLICKHOUSE_MIGRATION_URL: "clickhouse://langfuse-clickhouse:9000"
+      CLICKHOUSE_URL: "http://langfuse-clickhouse:8123"
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: "${LANGFUSE_CLICKHOUSE_PASSWORD:-change-me-clickhouse}"
+      # Single-node ClickHouse (no Zookeeper/replication configured here).
+      # Without this explicit false, Langfuse's migrations run
+      # `CREATE TABLE ... ON CLUSTER default`, which fails hard on a bare
+      # single node ("no Zookeeper configuration in server config").
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: "${LANGFUSE_MINIO_ROOT_USER:-langfuse-minio}"
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: "${LANGFUSE_MINIO_ROOT_PASSWORD:-change-me-langfuse-minio}"
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: "http://langfuse-minio:9000"
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: "events/"
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: "${LANGFUSE_MINIO_ROOT_USER:-langfuse-minio}"
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: "${LANGFUSE_MINIO_ROOT_PASSWORD:-change-me-langfuse-minio}"
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: "http://langfuse-minio:9000"
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: "media/"
+      REDIS_HOST: langfuse-redis
+      REDIS_PORT: "6379"
+      REDIS_AUTH: "${LANGFUSE_REDIS_AUTH:-change-me-langfuse-redis}"
+    depends_on: &langfuse-depends-on
+      db:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+      langfuse-minio:
+        condition: service_healthy
+
+  langfuse:
+    image: docker.langfuse.com/langfuse/langfuse:4
+    profiles: ["observability"]
+    restart: unless-stopped
+    # 1g OOM-killed the Next.js server during first-boot turbopack compilation
+    # (observed: "FATAL ERROR: Reached heap limit ... JavaScript heap out of
+    # memory"). Runtime footprint is ~120MB; the spike is compile-time only.
+    mem_limit: 2g
+    ports:
+      - "${LANGFUSE_HOST_PORT:-3001}:3000"
+    environment:
+      <<: *langfuse-env
+      NEXTAUTH_SECRET: "${LANGFUSE_NEXTAUTH_SECRET:-change-me-langfuse-secret}"
+      # LANGFUSE_INIT_ORG_ID is the switch: without it, v4 skips the whole
+      # seed step and silently ignores every other LANGFUSE_INIT_* var below
+      # (logged as a warning, easy to miss) — the keys this app is configured
+      # with then belong to no project and every trace export 401s.
+      LANGFUSE_INIT_ORG_ID: "${LANGFUSE_INIT_ORG_ID:-}"
+      LANGFUSE_INIT_ORG_NAME: "${LANGFUSE_INIT_ORG_NAME:-}"
+      LANGFUSE_INIT_PROJECT_ID: "${LANGFUSE_INIT_PROJECT_ID:-}"
+      LANGFUSE_INIT_PROJECT_NAME: "${LANGFUSE_INIT_PROJECT_NAME:-}"
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: "${LANGFUSE_PUBLIC_KEY:-}"
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: "${LANGFUSE_SECRET_KEY:-}"
+      LANGFUSE_INIT_USER_EMAIL: "${LANGFUSE_INIT_USER_EMAIL:-}"
+      LANGFUSE_INIT_USER_PASSWORD: "${LANGFUSE_INIT_USER_PASSWORD:-}"
+    depends_on: *langfuse-depends-on
+
+  # --------------------------------------------- local models (optional) ---
+  # Run entirely offline: point LLM_BASE_URL/EMBEDDER_BASE_URL at http://ollama:11434/v1
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["local-llm"]
+    restart: unless-stopped
+    expose:
+      - "11434"
+    ports:
+      - "${OLLAMA_HOST_PORT:-11434}:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+
+volumes:
+  postgres-data:
+  qdrant-data:
+  redis-data:
+  minio-data:
+  ollama-data:
+  # Shared so api and worker do not each re-download embedding/rerank models.
+  model-cache:
+  flashrank-cache:
+  langfuse-clickhouse-data:
+  langfuse-clickhouse-logs:
+  langfuse-minio-data:

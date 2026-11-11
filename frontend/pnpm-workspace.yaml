@@ -1,0 +1,11 @@
+packages:
+  - 'apps/*'
+  - 'packages/*'
+
+# Permit install scripts for first-party dev tooling: sharp powers Next.js
+# image optimisation, biome is the repo linter. Without an explicit decision
+# pnpm exits non-zero with ERR_PNPM_IGNORED_BUILDS, which restart-loops the
+# web container.
+allowBuilds:
+  '@biomejs/biome': true
+  sharp: true
